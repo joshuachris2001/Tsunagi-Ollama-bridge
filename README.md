@@ -1,12 +1,19 @@
-# Why?
-Sparked from the R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I have found the conflicts where Ollama does not like and created a patcher that simply merges the GGUF models to how Ollama expects. Ollama still has a few kinks, but that is part of the Ollama limitations with how the chat templites are handled; after this work I did not want to hog and Ollama's built-in create HF to Ollama requres a LOT of ram, where as llama.cpp's tools use mmaping [much nicer on memory].
+# Qwen3.x GGUF vision patcher
+This is a simple project made to quickly patch the slightly buggly Qwen3-VL and Qwen3.5 model family in Ollama. Made for People who would prefer Ollama over llama.cpp [*I do wish that Ollama fixes the templete handing, but what can we do~*]. 
+
+With this project you can take a plain llama.cpp gguf model into a direct Ollama compatible model, no more conversion work nesacary!
+
+[*and little ram use due to mmap-ing*]
+
+### Why?
+Sparked from the R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I have found the conflicts where Ollama does not like and created a patcher that simply merges the GGUF models to how Ollama expects. Ollama still has a few kinks, but that is part of the Ollama limitations with how the chat templites are handled; after this work I did not want to hog and Ollama's built-in create HF to Ollama requres a LOT of ram, where as llama.cpp's tools use mmaping [much nicer on memory]. *Is it not a pain that Ollama create just kills it'self due to OOM kills, why should we suffer with this when llama.cpp tools are more effecent and produces praticly the same file formats?*
 
 ### What's this about a model BLOB?
 To ensure the program had proper tensor configurations, I found it was easier to take vital mmproj information from the offical vision tensors than hardcoding it. Mainly to verify the Ollama Vision limits, Attention structure, and RoPE information
 Not completely required for Qwen3-VL models as most of it was hardcoded from taking samples from the blob models directly and pulling these values out (the said bruteforcing to get it to work). It seemded between the diffrent model sizes with Qwen3.5, hardcoding would not completly cut it.
 You can get the model BLOB, by downloading qwen3.5 model size for the base model; and looking at the resulting modelfile.
 
-# Preparation
+## Preparation
 In your python enviorment you should have `gguf` installed, I also included `tqdm` for progress bars; we also need `numpy` to handle the arrays.
 > pip install gguf tqdm numpy
 
@@ -21,7 +28,7 @@ For example Qwen3.5:4B:
 
 should be the second `FROM` to show the full path of the model BLOB on your system.
 
-# Usage
+## Usage
 The program has 3-4 important arguments
 `model-type` - I have not put an auto discover routine in the program [*I could perhaps pull it from the inputted model*], so the program would have to be told what model architecture this is:
 - `qwen3vl` [source blob not required]
