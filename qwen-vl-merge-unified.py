@@ -326,7 +326,9 @@ def build_arch_config(arch, ref_fields, mmproj_fields):
         writer.add_array("tokenizer.ggml.eos_token_ids",        [151645, 151643])
         # file_type 32 = mixed-precision (F16 + quantized); blob stores 15 which
         # is wrong for merged files that contain quantized LLM tensors
-        writer.add_uint32("general.file_type",                  32)
+        _ft = (int(_read_scalar(llm.fields, "general.file_type"))
+               if "general.file_type" in llm.fields else 32)
+        writer.add_uint32("general.file_type", _ft) # report the correct quant
 
     def inject_kv_qwen35(writer, ref, mf):
         """
