@@ -2,7 +2,7 @@
 Sparked from the R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I have found the conflicts where Ollama does not like and created a patcher that simply merges the GGUF models to how Ollama expects. Ollama still has a few kinks, but that is part of the Ollama limitations with how the chat templites are handled; after this work I did not want to hog and Ollama's built-in create HF to Ollama requres a LOT of ram, where as llama.cpp's tools use mmaping [much nicer on memory].
 
 ### What's this about a model BLOB?
-To ensure the program had proper tensor configurations, I found it was easyer take vital mmproj information from the offical vision tensors than hardcoding it. Mainly to verify the Ollama Vision limits, Attention structure, and RoPE information
+To ensure the program had proper tensor configurations, I found it was easier to take vital mmproj information from the offical vision tensors than hardcoding it. Mainly to verify the Ollama Vision limits, Attention structure, and RoPE information
 Not completely required for Qwen3-VL models as most of it was hardcoded from taking samples from the blob models directly and pulling these values out (the said bruteforcing to get it to work). It seemded between the diffrent model sizes with Qwen3.5, hardcoding would not completly cut it.
 You can get the model BLOB, by downloading qwen3.5 model size for the base model; and looking at the resulting modelfile.
 
