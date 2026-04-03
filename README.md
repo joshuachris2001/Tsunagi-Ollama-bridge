@@ -1,2 +1,3 @@
 # Ollama_qwen_mmproj_merger
-Basic Scripts that has been expermented together to properly merge Qwen3 and Qwen3.5 text model and projector models together.
+
+sparked from the R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I have found the conflicts where Ollama does not like and created a patcher that simply merges the GGUF models to how Ollama expects.
