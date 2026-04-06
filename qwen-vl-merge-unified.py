@@ -11,7 +11,8 @@ Supported model types
 ---------------------
   qwen3vl     — Qwen3-VL (dense, e.g. 7B)
   qwen3vlmoe  — Qwen3-VL-MoE (e.g. Jan-v2-VL-max)
-  qwen35      — Qwen3.5-VL (dense + SSM hybrid, e.g. 4B / 7B)
+  qwen35      — Qwen3.5 (dense + SSM hybrid, e.g. 4B / 7B)
+  qwen35moe   — Qwen3.5 (MoE, example 35B)
 
 Architecture differences handled automatically
 ----------------------------------------------
@@ -381,7 +382,8 @@ def build_arch_config(arch, ref_fields, mmproj_fields):
         writer.add_uint32("tokenizer.ggml.padding_token_id",  248044)
         writer.add_bool("tokenizer.ggml.add_eos_token",       False)
         writer.add_bool("tokenizer.ggml.add_padding_token",   False)
-        writer.add_array("tokenizer.ggml.eos_token_ids",      [151645, 151643])
+        eos_ids = _read_array(ref, "tokenizer.ggml.eos_token_ids")
+        writer.add_array("tokenizer.ggml.eos_token_ids",      [int(x) for x in eos_ids])
 
         # tokenizer.ggml.scores — SPM probability scores. Finetuned models
         # sometimes drop this field; transplanting from the blob prevents subtle
@@ -389,6 +391,20 @@ def build_arch_config(arch, ref_fields, mmproj_fields):
         if "tokenizer.ggml.scores" in ref:
             scores = _read_array(ref, "tokenizer.ggml.scores")
             writer.add_array("tokenizer.ggml.scores", scores)  # blob
+
+        # --- Vision deepstack (blob) — Qwen3.5 MoE has no deepstack; list
+        # read from blob so it is correct for any size ---
+        if f"{a}.vision.deepstack_visual_indexes" in ref:
+            f_ds = ref[f"{a}.vision.deepstack_visual_indexes"]
+            if len(f_ds.data) > 0:
+                ds_viz = _read_array(ref, f"{a}.vision.deepstack_visual_indexes")
+                writer.add_array(f"{a}.vision.deepstack_visual_indexes",
+                                 [int(x) for x in ds_viz])         # blob
+            else:
+                writer.add_array(f"{a}.vision.deepstack_visual_indexes", [])  # blob (empty)
+        else:
+            # Fallback: empty list (no deepstack for Qwen3.5 models)
+            writer.add_array(f"{a}.vision.deepstack_visual_indexes", [])  # default
 
         # --- General metadata ---
         writer.add_uint64("general.parameter_count", int(_read_scalar(ref, "general.parameter_count")))  # blob
@@ -398,7 +414,7 @@ def build_arch_config(arch, ref_fields, mmproj_fields):
         #writer.add_uint32("general.file_type",        int(_read_scalar(ref, "general.file_type")))        # blob
 
     # Wire up the correct inject function
-    if a == "qwen35":
+    if a in ("qwen35", "qwen35moe"):
         inject_kv = inject_kv_qwen35
     else:
         inject_kv = inject_kv_qwen3vl
@@ -411,7 +427,7 @@ def build_arch_config(arch, ref_fields, mmproj_fields):
     # "blk.N.ssm_dt" (no .bias suffix). The finetuned GGUF writes it as
     # "blk.N.ssm_dt.bias". We determine the layer count from the blob's
     # head_count_kv array length so this works for any model size.
-    if a == "qwen35":
+    if a in ("qwen35", "qwen35moe"):
         num_layers = len(_read_array(ref_fields, f"{a}.attention.head_count_kv"))
         llm_renames = {f"blk.{i}.ssm_dt.bias": f"blk.{i}.ssm_dt" for i in range(num_layers)}
     else:
@@ -574,8 +590,8 @@ def main():
     # Validate paths before doing any real work.
     # --blob is required for qwen35 (values are read from it dynamically).
     # For qwen3vl / qwen3vlmoe it is optional; the chat template comes from the LLM.
-    if args.model_type == "qwen35" and not args.blob:
-        sys.exit("ERROR: --blob is required for model type 'qwen35'")
+    if args.model_type in ("qwen35", "qwen35moe") and not args.blob:
+        sys.exit(f"ERROR: --blob is required for model type '{args.model_type}'")
 
     for label, path in [
         ("LLM",    args.llm),
