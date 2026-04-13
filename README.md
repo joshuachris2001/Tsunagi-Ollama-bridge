@@ -1,3 +1,10 @@
+# This project will be deprecated
+Why? Because it is difficult to add future models; so a complete restructuring is needed.
+The goal is to make a modular platform where I will not have spaghetti code in one file. 🍝 
+
+Most of the work is done and 100% supports Gemma4 multimodal gguf models. better yet, this project perhaps get a complete rebrand in the progress. 
+
+
 # Qwen3.x GGUF vision patcher
 This is a simple project made to quickly patch the slightly buggy Qwen3-VL and Qwen3.5 model family in Ollama. Made for people who would prefer Ollama over llama.cpp [*I do wish that Ollama fixes the template handling, but what can we do~*].
 
