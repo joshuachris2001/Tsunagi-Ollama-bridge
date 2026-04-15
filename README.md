@@ -1,30 +1,26 @@
-# This project will be deprecated
-Why? Because it is difficult to add future models; so a complete restructuring is needed.
-The goal is to make a modular platform where I will not have spaghetti code in one file. 🍝 
+# 繋
+### Project GGUF patcher for Ollama Multimodal Monoliths
+This project will take compatible models' pure llama.cpp text and mmproj models and convert it to a Ollama GGUF Monolith model.
 
-Most of the work is done and 100% supports Gemma4 multimodal gguf models. better yet, this project perhaps get a complete rebrand in the progress. 繋
+This project is modular, Instead of it's predicasor of spegetti code 🍝; it would be now easier to add model types and multimodal functions. 🧩
 
+### What is a Monolith model?
+Ollama's new engine handles GGUF models diffrently; these models are taken from hugging face models and converted to a **Merged** gguf format, this reduces memory overhead by storing the multimodal tensors in one place.
+This is why pure gguf models crash Ollama when acumpanied with a mmproj; it's formatted wrong or uses the wrong tensor formatting.
 
-# Qwen3.x GGUF vision patcher
-This is a simple project made to quickly patch the slightly buggy Qwen3-VL and Qwen3.5 model family in Ollama. Made for people who would prefer Ollama over llama.cpp [*I do wish that Ollama fixes the template handling, but what can we do~*].
+### Orgins
+* Qwen3.x GGUF vision patcher; This was simple project made to quickly patch the slightly buggy Qwen3-VL and Qwen3.5 model family in Ollama. Made for people who would prefer Ollama over llama.cpp [*I do wish that Ollama fixes the template handling, but what can we do~*]. [*and little RAM use due to mmap-ing*]
 
-With this project you can take a plain llama.cpp GGUF model into a direct Ollama-compatible model, no more conversion work necessary!
+Sparked from the need to find other ways to create Ollama GGUF multimodal models where limited memory is involved; (Will work on lessening the reliance of the source BLOBS over time); default `Ollama create` typicaly requires the enitre model loaded into RAM and can cause OOM kills; my system could not handle this, so I had to come up with a quick alternitve. GGUF is used here to reroute tensors to expectations [work on quant matching later], these tools use mmaping which reduces the RAM draw considerably.
 
-[*and little RAM use due to mmap-ing*]
-
-### Why?
-Sparked from the R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I found the conflicts where Ollama does not like and created a patcher that simply merges the GGUF models to how Ollama expects. Ollama still has a few kinks, but that is part of the Ollama limitations with how the chat templates are handled; after this work I did not want to hog it — and Ollama's built-in `create` requires a LOT of RAM, whereas llama.cpp's tools use mmap-ing [much nicer on memory]. *Is it not a pain that `ollama create` just kills itself due to OOM kills? Why should we suffer with this when llama.cpp tools are more efficient and produce practically the same file formats?*
+R&D of brute forcing [Jan-v2-VL](https://ollama.com/fredrezones55/Jan-v2-VL) to work with Ollama, I found the conflicts where Ollama does not like and created a patcher that merges the GGUF models to how Ollama expects. Ollama still has a few kinks, but that is part of the Ollama limitations with how the chat templates are handled.
 
 ### What's this about a model BLOB?
-To ensure the program had proper tensor configurations, I found it was easier to take vital mmproj information from the official vision tensors than hardcoding it — mainly to verify the Ollama vision limits, attention structure, and RoPE information.
+To ensure the program had proper tensor configurations, I found it was easier to take vital mmproj and other tensor information from the official vision tensors than hardcoding it — mainly to verify the Ollama vision limits, attention structure, and RoPE information, etc.
 
-Not completely required for Qwen3-VL models as most of it was hardcoded from taking samples from the blob models directly and pulling these values out (the said brute-forcing to get it to work). It seemed that between the different model sizes with Qwen3.5, hardcoding would not completely cut it.
+You can get the needed model BLOB by downloading the model size for that particular base model; 
 
-You can get the model BLOB by downloading the qwen3.5 model size for the base model and looking at the resulting modelfile.
-
-### What's in `advanced/` and `prototype/`?
-- **`advanced/`** — contains a reference shell script (`qwen-3-VL-Ollama_tuned_vission_quant.sh`) that documents approximately how the Ollama team quantizes the Qwen3-VL vision encoder. It uses `llama-quantize` with per-layer `--tensor-type` overrides, applying a mixed Q8_0/Q5_0 scheme to each `attn_v` block across all 27 vision layers, then quantizes the rest as F16. Useful if you want your merged mmproj to match Ollama's official quantization quality as closely as possible.
-- **`prototype/`** — the original per-architecture scripts (`Qwen3-VL-merge.py`, `Qwen3-VL-MOE-merge.py`, `Qwen3.5-merge.py`) that the unified program evolved from. Useful as a reference for understanding the R&D lineage.
+**This is important:** _For most cases the model of the finetuned model you have needs to be the same as the Ollama GGUF BLOB._
 
 ## Preparation
 In your Python environment you should have `gguf` installed. I also included `tqdm` for progress bars; we also need `numpy` to handle the arrays.
@@ -50,6 +46,7 @@ The program has 3–4 important arguments.
 - `qwen3vl` — source blob not required
 - `qwen3vlmoe` — source blob not required
 - `qwen35` — source blob is required
+- `gemma4` — source blob is required 
 
 `--llm` — the finetuned text model you want to use.
 
@@ -63,7 +60,7 @@ The program has 3–4 important arguments.
 
 **Qwen3-VL finetune (no blob needed):**
 ```bash
-python qwen-vl-merge-unified.py \
+python OllamaGGUFMerge.py \
     --model-type qwen3vl \
     --llm    my-finetune.Q5_K_M.gguf \
     --mmproj mmproj.gguf \
@@ -72,7 +69,7 @@ python qwen-vl-merge-unified.py \
 
 **Qwen3-VL-MOE finetune (no blob needed):**
 ```bash
-python qwen-vl-merge-unified.py \
+python OllamaGGUFMerge.py \
     --model-type qwen3vlmoe \
     --llm    my-finetune.Q4_K_M.gguf \
     --mmproj mmproj.gguf \
@@ -81,7 +78,7 @@ python qwen-vl-merge-unified.py \
 
 **Qwen3.5 finetune (blob required):**
 ```bash
-python qwen-vl-merge-unified.py \
+python OllamaGGUFMerge.py \
     --model-type qwen35 \
     --blob   /var/lib/ollama/blobs/sha256-81fb60... \
     --llm    my-finetune.Q6_K.gguf \
@@ -92,4 +89,4 @@ python qwen-vl-merge-unified.py \
 If `--output` is omitted, the merged model will be saved as `merged_qwen.gguf` in the current working directory.
 
 # AI Receipt
-I used Claude Sonnet 4.6 (via Perplexity) to assist with the program structure and the merging of the merge programs.
+I used Claude Sonnet 4.6 (via Perplexity) to assist with the program structure.
