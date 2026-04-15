@@ -20,8 +20,8 @@ import numpy as np
 from tqdm import tqdm
 from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
 
-from ModelCores import discover_models, load_model_core
-from ModelCores.base import (
+from .ModelCores import discover_models, load_model_core
+from .ModelCores.base import (
     FLOAT_TYPES, SKIP_META, copy_field, write_tensor, _read_scalar,
     STATUS_STABLE, STATUS_STUB, STATUS_EXPERIMENTAL,
 )
