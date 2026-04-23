@@ -66,6 +66,7 @@ _QWEN35_FALLBACK_TOKEN_IDS: dict[str, int] = {
 	"vision_start_token_id": 151652,
 	"vision_end_token_id":   151653,
 	"im_end_token_id":       151645,  # <|im_end|>
+	"endoftext_token_id":    151643,  # <|endoftext|>
 }
 
 # token string → bare key name (arch prefix added in inject_kv)
@@ -74,6 +75,7 @@ _QWEN35_TOKEN_MAP: dict[str, str] = {
 	"<|vision_start|>": "vision_start_token_id",
 	"<|vision_end|>":   "vision_end_token_id",
 	"<|im_end|>":       "im_end_token_id", # <|im_end|>
+	 "<|endoftext|>":    "endoftext_token_id",  # <|endoftext|>
 }
 
 
@@ -111,6 +113,8 @@ def _find_token_ids(llm_fields) -> dict[str, int]:
 
 		if missing:
 			raise KeyError(f"tokens not found in vocabulary: {missing}")
+
+		#print(f"  vocab[248044] = {repr(tokens[248044])}") # debug
 
 		return result
 
@@ -206,6 +210,7 @@ class Qwen35ModelCore(QwenBaseModelCore):
 
 		# -- Token IDs (vocab scan → fallback to constants) --
 		token_ids = _find_token_ids(llm_fields)
+
 		writer.add_uint32(f"{a}.image_token_id",        token_ids["image_token_id"])
 		writer.add_uint32(f"{a}.vision_start_token_id", token_ids["vision_start_token_id"])
 		writer.add_uint32(f"{a}.vision_end_token_id",   token_ids["vision_end_token_id"])
@@ -249,10 +254,10 @@ class Qwen35ModelCore(QwenBaseModelCore):
 			if "tokenizer.ggml.eos_token_ids" in llm_fields
 			else [int(_read_scalar(llm_fields, "tokenizer.ggml.eos_token_id"))]
 		)
-		# Ensure <|im_end|> is always present as a stop token
-		im_end_id = token_ids["im_end_token_id"]  # already scanned above
-		if im_end_id not in eos_ids:
-			eos_ids = list(eos_ids) + [im_end_id]
+		for key in ("im_end_token_id", "endoftext_token_id"):
+			tid = token_ids[key]
+			if tid not in eos_ids:
+				eos_ids = list(eos_ids) + [tid]
 		writer.add_array("tokenizer.ggml.eos_token_ids", [int(x) for x in eos_ids])
 
 		if "tokenizer.ggml.scores" in llm_fields:
