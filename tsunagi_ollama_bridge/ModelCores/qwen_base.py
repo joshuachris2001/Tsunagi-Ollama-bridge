@@ -290,5 +290,6 @@ class QwenBaseModelCore(BaseModelCore):  # pyright: ignore[reportImplicitAbstrac
     # LLM Tensor Renames — None needed for base Qwen path
     # ------------------------------------------------------------------
 
-    def get_llm_renames(self, ref_fields=None) -> dict[str, str]:
+    def get_llm_renames(self, ref_fields: dict | None = None, llm_fields: dict | None = None) -> dict[str, str]:  # pyright: ignore[reportMissingTypeArgument]
+        """Return a {old_name: new_name} dict for LLM tensors. Default: no renames."""
         return {}

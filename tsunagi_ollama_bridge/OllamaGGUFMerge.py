@@ -339,7 +339,7 @@ def main() -> None:
     core.prepare_llm(llm)
 
     # ── 12. Write LLM tensors ────────────────────────────────────────
-    llm_renames     = core.get_llm_renames(ref_fields)
+    llm_renames = core.get_llm_renames(ref_fields=ref_fields, llm_fields=llm.fields) # TODO resolve potental mismatch: llm_renames     = core.get_llm_renames(ref_fields)
     dropped_tensors: list[str] = []
 
     for t in tqdm(llm.tensors, desc="Writing LLM tensors", unit="tensor", leave=True):

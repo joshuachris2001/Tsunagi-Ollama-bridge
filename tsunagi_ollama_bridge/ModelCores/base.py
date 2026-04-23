@@ -305,7 +305,7 @@ class BaseModelCore(ABC):
     # Step 8: LLM tensor renames
     # ------------------------------------------------------------------
 
-    def get_llm_renames(self, ref_fields: dict | None = None) -> dict[str, str]:
+    def get_llm_renames(self, ref_fields: dict | None = None, llm_fields: dict | None =None) -> dict[str, str]:  # pyright: ignore[reportMissingTypeArgument]
         """Return a {old_name: new_name} dict for LLM tensors. Default: no renames."""
         return {}
 
