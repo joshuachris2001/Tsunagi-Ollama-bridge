@@ -190,6 +190,8 @@ class Qwen35ModelCore(QwenBaseModelCore):
     # ------------------------------------------------------------------
 
     def inject_kv(self, writer: GGUFWriter, ref_fields, mmproj_fields, llm_fields, *, args) -> None:
+        self._llm_fields = llm_fields  # stash for get_llm_renames
+        
         a = self.arch
 
         # -- Vision geometry (hardcoded — identical across all model sizes) --
@@ -269,16 +271,11 @@ class Qwen35ModelCore(QwenBaseModelCore):
     # ------------------------------------------------------------------
 
     def get_llm_renames(self, ref_fields=None) -> dict[str, str]:
-        """
-        Qwen3.5 finetuned LLMs store the SSM delta-time bias as
-        "blk.N.ssm_dt.bias"; Ollama's backend expects "blk.N.ssm_dt".
-        Layer count is read from llm_fields' per-layer head_count_kv array.
-        ref_fields here receives llm_fields from the caller.
-        """
-        if ref_fields is None:
+        fields = getattr(self, "_llm_fields", None) or ref_fields
+        if fields is None:
             return {}
         a = self.arch
-        num_layers = len(_read_array(ref_fields, f"{a}.attention.head_count_kv"))
+        num_layers = len(_read_array(fields, f"{a}.attention.head_count_kv"))
         return {f"blk.{i}.ssm_dt.bias": f"blk.{i}.ssm_dt"
                 for i in range(num_layers)}
 
