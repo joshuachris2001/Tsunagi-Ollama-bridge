@@ -65,6 +65,7 @@ _QWEN35_FALLBACK_TOKEN_IDS: dict[str, int] = {
 	"image_token_id":        151655,
 	"vision_start_token_id": 151652,
 	"vision_end_token_id":   151653,
+	"im_end_token_id":       151645,  # <|im_end|>
 }
 
 # token string → bare key name (arch prefix added in inject_kv)
@@ -72,6 +73,7 @@ _QWEN35_TOKEN_MAP: dict[str, str] = {
 	"<|image_pad|>":    "image_token_id",
 	"<|vision_start|>": "vision_start_token_id",
 	"<|vision_end|>":   "vision_end_token_id",
+	"<|im_end|>":       "im_end_token_id", # <|im_end|>
 }
 
 
@@ -240,11 +242,17 @@ class Qwen35ModelCore(QwenBaseModelCore):
 		writer.add_uint32("tokenizer.ggml.padding_token_id", 248044)
 		writer.add_bool  ("tokenizer.ggml.add_eos_token",    False)
 		writer.add_bool  ("tokenizer.ggml.add_padding_token", False)
+		
+		# Build eos_token_ids — text GGUF may have scalar or array form
 		eos_ids = (
 			_read_array(llm_fields, "tokenizer.ggml.eos_token_ids")
 			if "tokenizer.ggml.eos_token_ids" in llm_fields
 			else [int(_read_scalar(llm_fields, "tokenizer.ggml.eos_token_id"))]
 		)
+		# Ensure <|im_end|> is always present as a stop token
+		im_end_id = token_ids["im_end_token_id"]  # already scanned above
+		if im_end_id not in eos_ids:
+			eos_ids = list(eos_ids) + [im_end_id]
 		writer.add_array("tokenizer.ggml.eos_token_ids", [int(x) for x in eos_ids])
 
 		if "tokenizer.ggml.scores" in llm_fields:
