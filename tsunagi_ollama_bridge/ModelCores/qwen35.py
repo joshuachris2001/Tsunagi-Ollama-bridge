@@ -270,14 +270,13 @@ class Qwen35ModelCore(QwenBaseModelCore):
     # LLM Tensor Renames — SSM dt bias suffix fix
     # ------------------------------------------------------------------
 
-    def get_llm_renames(self, ref_fields=None) -> dict[str, str]:
-        fields = getattr(self, "_llm_fields", None) or ref_fields
+    def get_llm_renames(self, ref_fields=None, llm_fields=None) -> dict[str, str]:
+        fields = llm_fields or ref_fields
         if fields is None:
             return {}
         a = self.arch
         num_layers = len(_read_array(fields, f"{a}.attention.head_count_kv"))
-        return {f"blk.{i}.ssm_dt.bias": f"blk.{i}.ssm_dt"
-                for i in range(num_layers)}
+        return {f"blk.{i}.ssm_dt.bias": f"blk.{i}.ssm_dt" for i in range(num_layers)}
 
 
 # ---------------------------------------------------------------------------
