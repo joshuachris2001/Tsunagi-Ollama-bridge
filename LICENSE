@@ -1,0 +1,57 @@
+Tsunagi — Free to Use, Share, and Modify (Non-Commercial)
+
+SPDX-License-Identifier: CC-BY-NC-SA-4.0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tsunagi is licensed under CC BY-NC-SA 4.0 with the following conditions:
+
+✓ Use freely — personal projects, research, local model conversion
+✓ Share and fork — allowed, under the same terms
+✓ Credit required — derivatives must acknowledge Tsunagi and link to the original repo
+✗ No commercial use — can't be used in paid tools, hosted services, or API backends
+⚠ Models need a notice — anything built with Tsunagi must disclose it in the model card
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TERMS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. PERMITTED USE
+   You may use, modify, and distribute Tsunagi for non-commercial purposes,
+   including personal projects, research, and local model conversion.
+
+2. ATTRIBUTION
+   All derivatives, forks, and modified versions must:
+   - Credit Tsunagi in documentation or README
+   - Link to the original repository
+   - Retain this license (CC BY-NC-SA 4.0)
+
+3. MODEL OUTPUT NOTICE
+   Any model processed with Tsunagi (or derivatives) must include a
+   clear notice that it was generated using Tsunagi. Example:
+     "This model was processed with Tsunagi, an unofficial third-party
+      conversion tool. Output may differ from models produced by
+      official Ollama tooling."
+
+4. NON-COMMERCIAL RESTRICTION
+   You may not use this software in commercial products or services
+   without written permission. This includes:
+   - Paid conversion or patching services
+   - Commercial API backends
+   - Closed-source commercial software
+   - Any commercial offering where this tool is a core component
+
+5. NO WARRANTY
+   This software is provided AS-IS without warranty. The author is not
+   responsible for model degradation, missing tensors, or conversion errors.
+
+6. NO OLLAMA AFFILIATION
+   This project is independent and not affiliated with, endorsed by, or
+   supported by Ollama, Inc. Ollama is a trademark of Ollama, Inc.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For the full CC BY-NC-SA 4.0 legal text, see:
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
