@@ -6,27 +6,46 @@ ModelCore plugin for Gemma 4 (all sizes: E2B, E4B, 26B MoE, 31B dense).
 Gemma 4 specifics handled here
 -------------------------------
 • CLI flags      --vision / --audio to select which encoder(s) to include
-• KV drop        Extended set; most arch-critical KV is re-injected from blob
+• KV drop        Minimal — only keys that are re-injected or genuinely absent
 • KV renames     Gemma4-specific subset (no spatial_merge_size, uses image_size)
-• inject_kv      Sources all arch-critical values from the official Ollama blob
+• inject_kv      Sources all values from llm_fields, mmproj_fields, or hardcoded
+                 constants.  No Ollama blob required.
 • mmproj tensors Passthrough + audio tensor renames (ggml-org → Ollama naming)
-• Clamp scalars  Transplanted from blob if not already present in LLM tensors
+• Clamp scalars  Synthesised from calibrated block-0 constants (E2B/E4B, identical)
+                 plus ±FLT_MAX identity clamps for all other blocks.
 
 What this plugin does NOT do (handled by base / engine)
 --------------------------------------------------------
-• QKV splitting       (Gemma4 mmproj does not fuse QKV)
-• Deepstack handling  (Gemma4 has no deepstack vision layers)
+• QKV splitting        (Gemma4 mmproj does not fuse QKV)
+• Deepstack handling   (Gemma4 has no deepstack vision layers)
 • Patch-embed stacking (Gemma4 uses a standard single patch embed)
 • LLM tensor renames   (Gemma4 needs none)
+
+KV source map
+-------------
+llm_fields  → attention.head_count_kv, attention.key/value_length[_swa],
+              attention.sliding_window[_pattern], attention.shared_kv_layers,
+              embedding_length_per_layer_input, rope.dimension_count[_swa],
+              rope.freq_base[_swa], final_logit_softcapping,
+              feed_forward_length,
+              all tokenizer.ggml.* fields
+mmproj_fields → vision.feed_forward_length, vision.num_channels (default 3),
+                audio.block_count, audio.embedding_length,
+                audio.attention.head_count, audio.attention.layer_norm_epsilon,
+                audio.conv_kernel_size, audio.feed_forward_length
+hardcoded   → vision.projector.scale_factor = 3 (Go: if nMerge==0 { nMerge=3 })
+              tokenizer.ggml.add_eos_token = False (Go always forces this)
+              audio clamp block-0 constants (calibrated from Ollama E2B+E4B blobs)
+              audio clamp all other blocks = ±FLT_MAX identity
 """
 
 from __future__ import annotations
 
 import re
 import sys
+from typing import override
 
 import numpy as np
-from tqdm import tqdm
 from gguf import GGUFWriter, GGUFValueType, GGMLQuantizationType
 
 from .base import (
@@ -38,22 +57,62 @@ from .base import (
     write_tensor,
 )
 
+# ---------------------------------------------------------------------------
 # Activation-clamp scalar tensor suffixes (Gemma4ClippableLinear)
+# ---------------------------------------------------------------------------
+
 _CLAMP_SUFFIXES = (".input_min", ".input_max", ".output_min", ".output_max")
 
+# ---------------------------------------------------------------------------
+# Audio conformer block-0 clamp constants
+#
+# Source: direct read from Ollama blobs:
+#   sha256-4e30e26... (gemma4:e2b)  sha256-4c27e0f... (gemma4:e4b)
+# All 40 values are bit-for-bit identical between E2B and E4B, confirming
+# these are shared architecture constants, not per-size learned parameters.
+# Asymmetric ±X values are expected BF16 rounding artefacts.
+#
+# key → (input_min, input_max, output_min, output_max)
+# ---------------------------------------------------------------------------
+
+_AUDIO_CLAMP_BLK0: dict[str, tuple[float, float, float, float]] = {
+    "attn_k":     (-20.375,   +20.250,   -34.500,  +34.250),
+    "attn_out":   (-26.625,   +26.500,  -101.500, +100.500),
+    "attn_q":     (-20.375,   +20.250,   -34.500,  +34.250),
+    "attn_v":     (-20.375,   +20.250,   -34.500,  +34.250),
+    "conv_pw1":   (-32.500,   +32.250,   -29.625,  +29.375),
+    "conv_pw2":   ( -5.8125,   +5.7813,   -6.250,   +6.1875),
+    "ffn_down":   (-11.1875,  +11.0625,  -34.250,  +34.000),
+    "ffn_down_1": ( -9.4375,   +9.375,   -33.250,  +33.000),
+    "ffn_up":     (-12.875,   +12.8125,  -40.000,  +39.750),
+    "ffn_up_1":   (-11.1875,  +11.0625,  -26.375,  +26.125),
+}
+
+# All blocks other than block 0 receive identity clamps (±FLT_MAX) because
+# Ollama's Safetensors converter only embeds calibration data for block 0.
+_CLAMP_IDENTITY = float(np.finfo(np.float32).max)
+
+# The ordered list of audio conformer linear names that carry clamp scalars.
+# Matches the keys in _AUDIO_CLAMP_BLK0.
+_AUDIO_CLAMP_LINEARS: tuple[str, ...] = tuple(_AUDIO_CLAMP_BLK0.keys())
+
+
+# ---------------------------------------------------------------------------
+# Gemma4ModelCore
+# ---------------------------------------------------------------------------
 
 class Gemma4ModelCore(BaseModelCore):
     """Full merge plugin for Gemma 4 multimodal models."""
 
-    MODEL_TYPE = "gemma4"
-    REQUIRES_BLOB = True
+    MODEL_TYPE    = "gemma4"
+    REQUIRES_BLOB = False
     STATUS        = "stable"
 
     @classmethod
     def get_help_info(cls) -> dict:
         return {
             "description":   "Gemma 4 — all sizes (E2B, E4B, 26B MoE, 31B dense)",
-            "requires_blob": True,
+            "requires_blob": False,
             "status":        "stable",
             "extra_options": [
                 ("--vision", "Include vision encoder tensors and KV"),
@@ -68,8 +127,10 @@ class Gemma4ModelCore(BaseModelCore):
         # to avoid double-writing clamp scalars that the mmproj already carries.
         self._encoder_tensor_names: set[str] = set()
 
-    # CLI extension
+    # ── CLI extension ────────────────────────────────────────────────────────
+
     @classmethod
+    @override
     def add_args(cls, parser) -> None:
         g = parser.add_argument_group("Gemma 4 options")
         g.add_argument(
@@ -88,23 +149,30 @@ class Gemma4ModelCore(BaseModelCore):
         )
 
     @classmethod
+    @override
     def format_args_summary(cls, args) -> str | None:
-        return f"""Gemma4 Multimodal functions:
-  Vision: {"Enabled" if args.vision else "Disabled"}
-  Audio: {"Enabled" if args.audio else "Disabled"}
-        """
+        return (
+            f"Gemma4 Multimodal functions:\n"
+            f"  Vision: {'Enabled' if args.vision else 'Disabled'}\n"
+            f"  Audio:  {'Enabled' if args.audio  else 'Disabled'}\n"
+        )
 
-    # Argument validation
     @classmethod
+    @override
     def validate_args(cls, args) -> None:
         if not args.vision and not args.audio:
-            sys.exit("ERROR: gemma4 requires at least one of --vision or --audio; needs something to merge it, can be both.")
+            sys.exit(
+                "ERROR: gemma4 requires at least one of --vision or --audio; "
+                "needs something to merge, can be both."
+            )
 
-    # KV drop set
+    # ── KV drop set ──────────────────────────────────────────────────────────
+
+    @override
     def get_kv_drop(self) -> set[str]:
         a = self.arch
         extra: set[str] = {
-            # Re-injected from blob
+            # Sourced from llm_fields — drop to prevent passthrough duplicate
             f"{a}.attention.head_count_kv",
             f"{a}.attention.key_length",
             f"{a}.attention.key_length_swa",
@@ -119,10 +187,13 @@ class Gemma4ModelCore(BaseModelCore):
             f"{a}.rope.freq_base",
             f"{a}.rope.freq_base_swa",
             f"{a}.final_logit_softcapping",
-            f"{a}.vision.projector.scale_factor",
+            f"{a}.feed_forward_length",
+            # Sourced from mmproj_fields — drop to prevent passthrough duplicate
             f"{a}.vision.feed_forward_length",
             f"{a}.vision.num_channels",
-            # Tokenizer fields re-injected from blob
+            # Hardcoded constant — drop LLM passthrough copy
+            f"{a}.vision.projector.scale_factor",
+            # Tokenizer — re-injected from llm_fields with controlled types
             "tokenizer.ggml.eos_token_ids",
             "tokenizer.ggml.eos_token_id",
             "tokenizer.ggml.add_eos_token",
@@ -133,19 +204,19 @@ class Gemma4ModelCore(BaseModelCore):
             "tokenizer.ggml.pre",
             "tokenizer.ggml.scores",
             "tokenizer.ggml.token_type",
-            # Audio KV — re-injected conditionally from blob
+            # Audio KV — sourced from mmproj_fields, drop LLM copy
             f"{a}.audio.attention.head_count",
             f"{a}.audio.attention.layer_norm_epsilon",
             f"{a}.audio.block_count",
             f"{a}.audio.conv_kernel_size",
             f"{a}.audio.embedding_length",
             f"{a}.audio.feed_forward_length",
-            # Misc
-            "general.parameter_count",
         }
         return super().get_kv_drop() | extra
 
-    # KV renames — Gemma4 uses a different subset than Qwen
+    # ── KV renames ───────────────────────────────────────────────────────────
+
+    @override
     def get_kv_renames(self) -> dict[str, str]:
         a = self.arch
         return {
@@ -160,7 +231,9 @@ class Gemma4ModelCore(BaseModelCore):
             "clip.vision.image_size":                   f"{a}.vision.image_size",
         }
 
-    # mmproj KV conditional filter
+    # ── mmproj KV conditional filter ─────────────────────────────────────────
+
+    @override
     def should_skip_mmproj_kv(
         self, field_name: str, renamed_key: str, args
     ) -> bool:
@@ -171,172 +244,188 @@ class Gemma4ModelCore(BaseModelCore):
             or renamed_key.startswith(f"{a}.vision.")
         ):
             return True
-        # Audio KV from mmproj is always handled by inject_kv; suppress here
+        # Audio KV from mmproj is injected explicitly in inject_kv; suppress passthrough
         if field_name.startswith("clip.audio."):
             return True
         return False
 
-    # KV injection
-    def inject_kv(
-        self,
-        writer: GGUFWriter,
-        ref_fields: dict,
-        mmproj_fields: dict,
-        llm_fields: dict,
-        *,
-        args,
-    ) -> None:
+    # ── KV injection ─────────────────────────────────────────────────────────
+
+    def inject_kv( self, writer: GGUFWriter, ref_fields: dict | None, mmproj_fields: dict, llm_fields: dict, *, args, ) -> None:  # pyright: ignore[reportMissingTypeArgument]
         """
         Inject all architecture-critical KV fields for Gemma 4.
-        Every value is sourced from the official Ollama blob so the merged
-        output is structurally identical to what Ollama has validated.
+
+        Sources (in priority order per field):
+          llm_fields    — LLM architecture KV (attention, rope, logit cap, tokenizer)
+          mmproj_fields — Encoder architecture KV (vision/audio block counts etc.)
+          hardcoded     — Constants verified against Ollama convert_gemma4.go
         """
         a = self.arch
-        ref = ref_fields  # shorter alias
 
-        # ── Attention (blob) ──────────────────────────────────────────
-        # head_count_kv may be a scalar (E2B uniform=1) or per-layer array
-        hckv_field = ref[f"{a}.attention.head_count_kv"]
+        # ── Attention ──────────────────────────────────────────────────────
+        # head_count_kv: scalar for 26B/31B (uniform), per-layer array for E2B/E4B
+        hckv_fqn = f"{a}.attention.head_count_kv"
+        hckv_field = llm_fields[hckv_fqn]
         if hckv_field.types[0] == GGUFValueType.ARRAY:
-            writer.add_array(
-                f"{a}.attention.head_count_kv",
-                _read_array(ref, f"{a}.attention.head_count_kv"),
-            )
+            writer.add_array(hckv_fqn, _read_array(llm_fields, hckv_fqn))
         else:
-            writer.add_uint32(
-                f"{a}.attention.head_count_kv",
-                int(_read_scalar(ref, f"{a}.attention.head_count_kv")),
-            )
+            writer.add_uint32(hckv_fqn, int(_read_scalar(llm_fields, hckv_fqn)))
 
         writer.add_uint32(
             f"{a}.attention.key_length",
-            int(_read_scalar(ref, f"{a}.attention.key_length")),
+            int(_read_scalar(llm_fields, f"{a}.attention.key_length")),
         )
         writer.add_uint32(
             f"{a}.attention.value_length",
-            int(_read_scalar(ref, f"{a}.attention.value_length")),
+            int(_read_scalar(llm_fields, f"{a}.attention.value_length")),
         )
 
         for k in ("key_length_swa", "value_length_swa"):
             fqn = f"{a}.attention.{k}"
-            if fqn in ref:
-                writer.add_uint32(fqn, int(_read_scalar(ref, fqn)))
+            if fqn in llm_fields:
+                writer.add_uint32(fqn, int(_read_scalar(llm_fields, fqn)))
 
         writer.add_uint32(
             f"{a}.attention.sliding_window",
-            int(_read_scalar(ref, f"{a}.attention.sliding_window")),
+            int(_read_scalar(llm_fields, f"{a}.attention.sliding_window")),
         )
 
-        swp = _read_array(ref, f"{a}.attention.sliding_window_pattern")
-        writer.add_array(
-            f"{a}.attention.sliding_window_pattern",
-            [bool(x) for x in swp],
-        )
+        swp_fqn = f"{a}.attention.sliding_window_pattern"
+        swp = _read_array(llm_fields, swp_fqn)
+        writer.add_array(swp_fqn, [bool(x) for x in swp])
 
         fqn_skv = f"{a}.attention.shared_kv_layers"
-        if fqn_skv in ref:
-            writer.add_uint32(fqn_skv, int(_read_scalar(ref, fqn_skv)))
+        if fqn_skv in llm_fields:
+            writer.add_uint32(fqn_skv, int(_read_scalar(llm_fields, fqn_skv)))
 
-        # embedding_length_per_layer_input is a top-level key (not under .attention.)
+        # embedding_length_per_layer_input — top-level key, absent on 26B MoE/31B dense
         fqn_embd = f"{a}.embedding_length_per_layer_input"
-        if fqn_embd in ref:
-            val = int(_read_scalar(ref, fqn_embd))
+        if fqn_embd in llm_fields:
+            val = int(_read_scalar(llm_fields, fqn_embd))
             writer.add_uint32(fqn_embd, val)
             print(f"  ✓ injected {fqn_embd} = {val}")
         else:
-            print(f"  NOTE: {fqn_embd} not in blob (26B MoE/31B dense — expected)")
+            print(f"  NOTE: {fqn_embd} absent (26B MoE / 31B dense — expected)")
 
-        # ── RoPE (blob) ───────────────────────────────────────────────
+        # ── RoPE ───────────────────────────────────────────────────────────
         writer.add_uint32(
             f"{a}.rope.dimension_count",
-            int(_read_scalar(ref, f"{a}.rope.dimension_count")),
+            int(_read_scalar(llm_fields, f"{a}.rope.dimension_count")),
         )
-        if f"{a}.rope.dimension_count_swa" in ref:
-            writer.add_uint32(
-                f"{a}.rope.dimension_count_swa",
-                int(_read_scalar(ref, f"{a}.rope.dimension_count_swa")),
-            )
+        fqn_dc_swa = f"{a}.rope.dimension_count_swa"
+        if fqn_dc_swa in llm_fields:
+            writer.add_uint32(fqn_dc_swa, int(_read_scalar(llm_fields, fqn_dc_swa)))
+
         writer.add_float32(
             f"{a}.rope.freq_base",
-            float(_read_scalar(ref, f"{a}.rope.freq_base")),
+            float(_read_scalar(llm_fields, f"{a}.rope.freq_base")),
         )
-        if f"{a}.rope.freq_base_swa" in ref:
-            writer.add_float32(
-                f"{a}.rope.freq_base_swa",
-                float(_read_scalar(ref, f"{a}.rope.freq_base_swa")),
-            )
+        fqn_fb_swa = f"{a}.rope.freq_base_swa"
+        if fqn_fb_swa in llm_fields:
+            writer.add_float32(fqn_fb_swa, float(_read_scalar(llm_fields, fqn_fb_swa)))
 
-        # ── Logit softcapping (blob) ──────────────────────────────────
+        # ── Logit softcapping ───────────────────────────────────────────────
         writer.add_float32(
             f"{a}.final_logit_softcapping",
-            float(_read_scalar(ref, f"{a}.final_logit_softcapping")),
+            float(_read_scalar(llm_fields, f"{a}.final_logit_softcapping")),
         )
 
-        # ── Vision KV (blob, conditional) ────────────────────────────
+        # ── feed_forward_length — scalar or per-layer array (E2B/E4B) ──────
+        ffl_fqn = f"{a}.feed_forward_length"
+        if ffl_fqn in llm_fields:
+            ffl_field = llm_fields[ffl_fqn]
+            if ffl_field.types[0] == GGUFValueType.ARRAY:
+                writer.add_array(ffl_fqn, [int(x) for x in _read_array(llm_fields, ffl_fqn)])
+            else:
+                writer.add_uint32(ffl_fqn, int(_read_scalar(llm_fields, ffl_fqn)))
+
+        # ── Vision KV (mmproj + hardcoded) ─────────────────────────────────
         if args.vision:
-            writer.add_uint32(
-                f"{a}.vision.projector.scale_factor",
-                int(_read_scalar(ref, f"{a}.vision.projector.scale_factor")),
+            # scale_factor: Go converter defaults to 3 when absent
+            # clip.vision.pooling_kernel_size is the mmproj source; fall back to 3
+            _scale_key = "clip.vision.pooling_kernel_size"
+            scale_factor = (
+                int(_read_scalar(mmproj_fields, _scale_key))
+                if _scale_key in mmproj_fields
+                else 3
             )
-            if f"{a}.vision.feed_forward_length" in ref:
+            writer.add_uint32(f"{a}.vision.projector.scale_factor", scale_factor)
+
+            # feed_forward_length from mmproj
+            _vffl_key = "clip.vision.feed_forward_length"
+            if _vffl_key in mmproj_fields:
                 writer.add_uint32(
                     f"{a}.vision.feed_forward_length",
-                    int(_read_scalar(ref, f"{a}.vision.feed_forward_length")),
-                )
-            if f"{a}.vision.num_channels" in ref:
-                writer.add_uint32(
-                    f"{a}.vision.num_channels",
-                    int(_read_scalar(ref, f"{a}.vision.num_channels")),
+                    int(_read_scalar(mmproj_fields, _vffl_key)),
                 )
 
-        # ── Audio KV (blob, conditional — E2B/E4B only) ──────────────
+            # num_channels: Go converter defaults to 3 when absent
+            _vch_key = "clip.vision.num_channels"
+            num_channels = (
+                int(_read_scalar(mmproj_fields, _vch_key))
+                if _vch_key in mmproj_fields
+                else 3
+            )
+            writer.add_uint32(f"{a}.vision.num_channels", num_channels)
+
+        # ── Audio KV (mmproj, conditional — E2B/E4B only) ──────────────────
         if args.audio:
-            _audio_kv = [
-                (f"{a}.audio.attention.head_count",       "uint32"),
-                (f"{a}.audio.attention.layer_norm_epsilon","float32"),
-                (f"{a}.audio.block_count",                "uint32"),
-                (f"{a}.audio.conv_kernel_size",           "uint32"),
-                (f"{a}.audio.embedding_length",           "uint32"),
-                (f"{a}.audio.feed_forward_length",        "uint32"),
+            _audio_kv: list[tuple[str, str, str]] = [
+                # (mmproj clip.audio.* key,  output fqn,  type)
+                ("clip.audio.attention.head_count",
+                 f"{a}.audio.attention.head_count",        "uint32"),
+                ("clip.audio.attention.layer_norm_epsilon",
+                 f"{a}.audio.attention.layer_norm_epsilon","float32"),
+                ("clip.audio.block_count",
+                 f"{a}.audio.block_count",                 "uint32"),
+                ("clip.audio.conv_kernel_size",
+                 f"{a}.audio.conv_kernel_size",            "uint32"),
+                ("clip.audio.embedding_length",
+                 f"{a}.audio.embedding_length",            "uint32"),
+                ("clip.audio.feed_forward_length",
+                 f"{a}.audio.feed_forward_length",         "uint32"),
             ]
-            for fqn, vtype in _audio_kv:
-                if fqn not in ref:
-                    print(f"  WARNING: audio KV '{fqn}' not in blob — skipping")
+            for src_key, out_fqn, vtype in _audio_kv:
+                if src_key not in mmproj_fields:
+                    # layer_norm_epsilon defaults to 1e-6 (Go: if eps==0 { eps=1e-6 })
+                    if src_key == "clip.audio.attention.layer_norm_epsilon":
+                        writer.add_float32(out_fqn, 1e-6)
+                        print(f"  NOTE: {src_key} absent — using default 1e-6")
+                    else:
+                        print(f"  WARNING: audio KV '{src_key}' not in mmproj — skipping")
                     continue
-                val = _read_scalar(ref, fqn)
+                val = _read_scalar(mmproj_fields, src_key)
                 if vtype == "uint32":
-                    writer.add_uint32(fqn, int(val))
+                    writer.add_uint32(out_fqn, int(val))
                 else:
-                    writer.add_float32(fqn, float(val))
+                    writer.add_float32(out_fqn, float(val))
 
-            # feed_forward_length as per-layer array (E2B/E4B)
-            ffl_key = f"{a}.feed_forward_length"
-            if ffl_key in ref:
-                ffl_field = ref[ffl_key]
-                if ffl_field.types[0] == GGUFValueType.ARRAY:
-                    writer.add_array(ffl_key, [int(x) for x in _read_array(ref, ffl_key)])
-                else:
-                    writer.add_uint32(ffl_key, int(_read_scalar(ref, ffl_key)))
-
-        # ── Tokenizer (blob) ─────────────────────────────────────────
-        eos_ids = _read_array(ref, "tokenizer.ggml.eos_token_ids")
-        writer.add_array("tokenizer.ggml.eos_token_ids", [int(x) for x in eos_ids])
+        # ── Tokenizer (llm_fields passthrough, controlled) ──────────────────
+        # add_eos_token: Go converter always forces False
         writer.add_bool("tokenizer.ggml.add_eos_token", False)
 
-        for str_key in ("tokenizer.ggml.model", "tokenizer.ggml.pre"):
-            if str_key in ref:
-                val = bytes(ref[str_key].parts[ref[str_key].data[0]]).decode("utf-8")
-                writer.add_string(str_key, val)
+        # eos_token_ids — prefer array form, fall back to scalar eos_token_id
+        if "tokenizer.ggml.eos_token_ids" in llm_fields:
+            eos_ids = _read_array(llm_fields, "tokenizer.ggml.eos_token_ids")
+            writer.add_array("tokenizer.ggml.eos_token_ids", [int(x) for x in eos_ids])
+        elif "tokenizer.ggml.eos_token_id" in llm_fields:
+            eos_id = int(_read_scalar(llm_fields, "tokenizer.ggml.eos_token_id"))
+            writer.add_array("tokenizer.ggml.eos_token_ids", [eos_id])
 
-        if "tokenizer.ggml.eos_token_id" in ref:
+        if "tokenizer.ggml.eos_token_id" in llm_fields:
             writer.add_uint32(
                 "tokenizer.ggml.eos_token_id",
-                int(_read_scalar(ref, "tokenizer.ggml.eos_token_id")),
+                int(_read_scalar(llm_fields, "tokenizer.ggml.eos_token_id")),
             )
 
+        for str_key in ("tokenizer.ggml.model", "tokenizer.ggml.pre"):
+            if str_key in llm_fields:
+                f = llm_fields[str_key]
+                writer.add_string(str_key, bytes(f.parts[f.data[0]]).decode("utf-8"))
+
         for arr_key in ("tokenizer.ggml.scores", "tokenizer.ggml.token_type"):
-            if arr_key in ref:
-                copy_field(writer, ref[arr_key], name=arr_key)
+            if arr_key in llm_fields:
+                copy_field(writer, llm_fields[arr_key], name=arr_key)
 
         for bool_key in (
             "tokenizer.ggml.add_bos_token",
@@ -344,20 +433,17 @@ class Gemma4ModelCore(BaseModelCore):
             "tokenizer.ggml.add_mask_token",
             "tokenizer.ggml.add_unknown_token",
         ):
-            if bool_key in ref:
-                writer.add_bool(bool_key, bool(_read_scalar(ref, bool_key)))
+            if bool_key in llm_fields:
+                writer.add_bool(bool_key, bool(_read_scalar(llm_fields, bool_key)))
 
-        if "tokenizer.ggml.bos_token_id" in ref:
+        if "tokenizer.ggml.bos_token_id" in llm_fields:
             writer.add_uint32(
                 "tokenizer.ggml.bos_token_id",
-                int(_read_scalar(ref, "tokenizer.ggml.bos_token_id")),
+                int(_read_scalar(llm_fields, "tokenizer.ggml.bos_token_id")),
             )
 
-        # ── General metadata ──────────────────────────────────────────
-        writer.add_uint64(
-            "general.parameter_count",
-            int(_read_scalar(ref, "general.parameter_count")),
-        )
+        # ── General metadata ────────────────────────────────────────────────
+        # general.parameter_count does not exist in Ollama Gemma4 blobs — omit.
         _ft = (
             int(_read_scalar(llm_fields, "general.file_type"))
             if "general.file_type" in llm_fields
@@ -365,15 +451,18 @@ class Gemma4ModelCore(BaseModelCore):
         )
         writer.add_uint32("general.file_type", _ft)
 
-    # LLM tensor renames — Gemma 4 needs none
-    def get_llm_renames(self, ref_fields=None) -> dict[str, str]:
-        return {}
+    # ── LLM tensor renames — Gemma 4 needs none ──────────────────────────────
 
-    # Pre-scan LLM for clamp scalars
+    #def get_llm_renames(self, ref_fields=None, llm_fields=None) -> dict[str, str]:
+    #    return {}
+
+    # ── Pre-scan LLM for clamp scalars ───────────────────────────────────────
+
+    @override
     def prepare_llm(self, llm) -> None:
         """
         Check whether the LLM GGUF already contains clamp scalar tensors.
-        If it does, we skip the blob transplant step (post_write_tensors).
+        If it does, skip the synthesis step in post_write_tensors().
         """
         self._llm_has_clamps = any(
             any(t.name.endswith(s) for s in _CLAMP_SUFFIXES)
@@ -383,9 +472,11 @@ class Gemma4ModelCore(BaseModelCore):
         if self._llm_has_clamps:
             print("  NOTE: LLM already contains clamp scalar tensors")
 
-    # LLM tensor drop filter
+    # ── LLM tensor drop filter ────────────────────────────────────────────────
+
+    @override
     def should_drop_llm_tensor(
-        self, name: str, *, args, encoder_tensors: dict
+        self, name: str, *, args, encoder_tensors: dict  # pyright: ignore[reportMissingTypeArgument]
     ) -> bool:
         if name.startswith(("a.", "v.")):
             # Keep clamp scalars if the LLM already supplies them
@@ -394,15 +485,16 @@ class Gemma4ModelCore(BaseModelCore):
             return True
         return False
 
-    # mmproj tensor processing
-    def process_mmproj_tensors(self, mmproj, args) -> dict:
+    # ── mmproj tensor processing ──────────────────────────────────────────────
+
+    @override
+    def process_mmproj_tensors(self, mmproj, args) -> dict:  # pyright: ignore[reportMissingTypeArgument]
         """
         Gemma 4 mmproj passthrough with:
         - Modality filtering via --vision / --audio flags
         - Audio tensor renames (ggml-org llama.cpp names → Ollama blob names)
         - Validation that audio tensors exist when --audio is requested
         """
-        # Detect audio tensor presence before filtering
         mmproj_names = {t.name for t in mmproj.tensors}
         has_audio = any(
             n.startswith("a.") or n.startswith("mm.a.")
@@ -421,8 +513,8 @@ class Gemma4ModelCore(BaseModelCore):
         skipped_audio = skipped_vision = renamed_count = 0
 
         for t in mmproj.tensors:
-            is_audio   = t.name.startswith("a.") or t.name.startswith("mm.a.")
-            is_vision  = (
+            is_audio    = t.name.startswith("a.") or t.name.startswith("mm.a.")
+            is_vision   = (
                 t.name.startswith("v.")
                 or t.name == "mm.input_projection.weight"
                 or t.name == "rope_freqs.weight"
@@ -464,76 +556,106 @@ class Gemma4ModelCore(BaseModelCore):
         if skipped_vision:
             print(f"  Vision tensors stripped  : {skipped_vision}")
 
-        # Cache the final names so post_write_tensors() can skip any
-        # clamp scalars that the mmproj already supplied.
         self._encoder_tensor_names = set(encoder_tensors.keys())
 
-        # Report how many clamp tensors the mmproj carries (diagnostic)
         mmproj_clamps = [
             n for n in self._encoder_tensor_names
             if any(n.endswith(s) for s in _CLAMP_SUFFIXES)
         ]
         if mmproj_clamps:
-            print(f"  Clamp scalars in mmproj  : {len(mmproj_clamps)} (blob transplant will skip these)")
+            print(f"  Clamp scalars in mmproj  : {len(mmproj_clamps)} (synthesis will skip these)")
 
         return encoder_tensors
 
-    # Step 12: Post-write — transplant clamp scalars from blob
+    # ── Post-write: synthesise audio clamp scalars ───────────────────────────
+
+    @override
     def post_write_tensors(self, writer: GGUFWriter, ref, args) -> None:
         """
-        Gemma4ClippableLinear layers store learned activation clamp bounds as
-        1-element F32 scalar tensors.  For a.* and v.* tensors these scalars
-        live in the BLOB's tensor section, not in the mmproj.
-        Only mm.* clamp scalars reside in the mmproj.
+        Gemma4ClippableLinear layers need 1-element F32 clamp scalar tensors
+        (name + ".input_min" / ".input_max" / ".output_min" / ".output_max").
+        clip.cpp reads them into clamp_info_map; without them, clamping falls
+        back to ±FLT_MAX for every layer, degrading encoder quality.
 
-        clip.cpp reads them via name + ".input_min" etc. and stores them in
-        clamp_info_map. Without them, clamping defaults to ±FLT_MAX, degrading
-        encoder quality.
+        Strategy (no blob required):
+          • Block 0:  inject calibrated constants from _AUDIO_CLAMP_BLK0,
+                      verified identical across E2B and E4B Ollama blobs.
+          • All other blocks: inject ±FLT_MAX identity clamps.
+                      Ollama's Safetensors pipeline only embeds block-0
+                      calibration data, so identity is the correct default.
+
+        Skip entirely if:
+          • --audio is not set (no audio encoder in output)
+          • The LLM GGUF already supplied clamp scalars
+          • The mmproj already covered all clamp scalars
         """
-        if ref is None:
+        if not args.audio:
             return
 
         if self._llm_has_clamps:
-            print("\nSkipping clamp scalar transplant — LLM already has them.")
+            print("\nSkipping clamp scalar synthesis — LLM already has them.")
             return
 
-        clamp_tensors = [
-            t for t in ref.tensors
-            if any(t.name.endswith(s) for s in _CLAMP_SUFFIXES)
-            and (t.name.startswith("a.") or t.name.startswith("v."))
-        ]
-
-        if not clamp_tensors:
-            print("  NOTE: no clamp scalar tensors found in blob (unexpected for Gemma4)")
+        # Count audio blocks from encoder tensor names
+        block_indices = {
+            int(m.group(1))
+            for n in self._encoder_tensor_names
+            if (m := re.match(r"a\.blk\.(\d+)\.", n))
+        }
+        if not block_indices:
+            print("  WARNING: no a.blk.* tensors found — cannot synthesise audio clamps.")
             return
 
-        # Filter to only the clamps that are NOT already in encoder_tensors.
-        # The mmproj can carry a.*/v.* clamp scalars for some model builds;
-        # writing them again from the blob causes a duplicate tensor error.
-        missing_clamps = [
-            t for t in clamp_tensors
-            if t.name not in self._encoder_tensor_names
-            and (t.name.startswith("a.") and args.audio
-                 or t.name.startswith("v.") and args.vision)
-        ]
-        already_have = len(clamp_tensors) - len(missing_clamps)
-        if already_have:
-            print(f"  Skipping {already_have} clamp tensor(s) already written from mmproj")
+        num_blocks = max(block_indices) + 1
 
-        if not missing_clamps:
-            print("  All clamp scalars covered — no blob transplant needed.")
-            return
+        # Find which clamp scalars the mmproj already wrote
+        already_written = {
+            n for n in self._encoder_tensor_names
+            if any(n.endswith(s) for s in _CLAMP_SUFFIXES) and n.startswith("a.")
+        }
 
-        print(f"\nCopying {len(missing_clamps)} clamp scalar tensors from blob...")
-        for t in tqdm(missing_clamps, desc="Clamp scalars", unit="tensor", leave=True):
-            data  = np.asarray(t.data)
-            dtype = t.tensor_type  # always F32
-            shape = [int(x) for x in t.shape[::-1]] if dtype in FLOAT_TYPES else None
-            write_tensor(writer, t.name, data, dtype, shape)
+        total = num_blocks * len(_AUDIO_CLAMP_LINEARS) * 4
+        skipped = 0
+        print(
+            f"\n  Synthesising audio clamp scalars "
+            f"({num_blocks} blocks × {len(_AUDIO_CLAMP_LINEARS)} linears × 4)..."
+        )
+
+        for blk in range(num_blocks):
+            for linear in _AUDIO_CLAMP_LINEARS:
+                if blk == 0 and linear in _AUDIO_CLAMP_BLK0:
+                    imin, imax, omin, omax = _AUDIO_CLAMP_BLK0[linear]
+                else:
+                    imin = omin = -_CLAMP_IDENTITY
+                    imax = omax =  _CLAMP_IDENTITY
+
+                for sfx, val in (
+                    (".input_min",  imin),
+                    (".input_max",  imax),
+                    (".output_min", omin),
+                    (".output_max", omax),
+                ):
+                    tname = f"a.blk.{blk}.{linear}{sfx}"
+                    if tname in already_written:
+                        skipped += 1
+                        continue
+                    write_tensor(
+                        writer, tname,
+                        np.array([val], dtype=np.float32),
+                        GGMLQuantizationType.F32,
+                        [1],
+                    )
+
+        written = total - skipped
+        if skipped:
+            print(f"  Skipped {skipped} clamp scalar(s) already present from mmproj.")
+        print(f"  Audio clamp scalars written: {written}")
+
 
 # ---------------------------------------------------------------------------
 # Module-level audio tensor rename helper
 # ---------------------------------------------------------------------------
+
 def _gemma4_audio_rename(name: str) -> str:
     """
     Rename a single mmproj audio tensor from its llama.cpp (ggml-org) name
@@ -555,30 +677,29 @@ def _gemma4_audio_rename(name: str) -> str:
     (*) llama.cpp maps norm_out via A_ENC_OUTPUT_NORM → "a.blk.{bid}.ln2".
         Ollama calls the same tensor "layer_pre_norm" via Replacements().
 
-    IMPORTANT: blk_renames contains a chain (attn_post_norm→ln2, ln2→layer_pre_norm).
-    Each tensor is renamed with a single lookup — there is no chaining.
+    Each tensor receives at most ONE rename lookup — no chaining.
     """
     # Per-block renames (a.blk.N.xxx → a.blk.N.yyy)
     m = re.match(r"(a\.blk\.\d+\.)(.*)", name)
     if m:
         prefix, suffix = m.group(1), m.group(2)
         blk_renames = {
-            "attn_pre_norm.weight":  "ln1.weight",            # AttnPreNorm   gguf:"ln1"
-            "attn_post_norm.weight": "ln2.weight",            # AttnPostNorm  gguf:"ln2"
-            "ln2.weight":            "layer_pre_norm.weight", # Norm (block)  gguf:"layer_pre_norm"
-            "attn_k_rel.weight":     "linear_pos.weight",     # LinearPos     gguf:"linear_pos.weight"
+            "attn_pre_norm.weight":  "ln1.weight",             # AttnPreNorm  gguf:"ln1"
+            "attn_post_norm.weight": "ln2.weight",             # AttnPostNorm gguf:"ln2"
+            "ln2.weight":            "layer_pre_norm.weight",  # Norm (block) gguf:"layer_pre_norm"
+            "attn_k_rel.weight":     "linear_pos.weight",      # LinearPos    gguf:"linear_pos"
         }
         if suffix in blk_renames:
             return prefix + blk_renames[suffix]
 
     # Top-level projector renames
-    # mmproj "a.pre_encode.out"     = audio output projection  → Ollama "mm.a.fc"
-    # mmproj "a.input_projection"   = SSCP input proj linear   → Ollama "a.pre_encode.out"
-    # mmproj "mm.a.input_projection"= audio embedding proj     → unchanged
+    # mmproj "a.pre_encode.out"      = audio output projection → Ollama "mm.a.fc"
+    # mmproj "a.input_projection"    = SSCP input proj linear  → Ollama "a.pre_encode.out"
+    # mmproj "mm.a.input_projection" = audio embedding proj    → unchanged
     proj_renames = {
-        "a.pre_encode.out.weight":  "mm.a.fc.weight",
-        "a.pre_encode.out.bias":    "mm.a.fc.bias",
-        "a.input_projection.weight":"a.pre_encode.out.weight",
+        "a.pre_encode.out.weight":   "mm.a.fc.weight",
+        "a.pre_encode.out.bias":     "mm.a.fc.bias",
+        "a.input_projection.weight": "a.pre_encode.out.weight",
     }
     if name in proj_renames:
         return proj_renames[name]

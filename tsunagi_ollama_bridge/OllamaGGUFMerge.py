@@ -40,7 +40,7 @@ _STATUS_BADGE = {
 
 _BLOB_BADGE = {
     True:  "blob required",
-    False: "blob optional",
+    False: "blob not required",
 }
 
 def print_models(model_registry: dict) -> None:  # pyright: ignore[reportMissingTypeArgument]
@@ -51,9 +51,9 @@ def print_models(model_registry: dict) -> None:  # pyright: ignore[reportMissing
         cls  = model_registry[mtype]
         info = cls.get_help_info()
         status   = _STATUS_BADGE.get(info["status"], info["status"])
-        blob_tag = "required" if info["requires_blob"] else "optional"
+        blob_tag = "required" if info["requires_blob"] else "internalized"
         desc     = info["description"] or ""
-        print(f"{mtype:<16} {status:<14} {blob_tag:<10} {desc}")
+        print(f"{mtype:<12} {status:<8} {blob_tag:<10} {desc}")
     print()
     sys.exit(0)
 
@@ -115,7 +115,7 @@ Available Models: {len(model_registry)}\n\tUse --models to see full list detecte
 
   Status badges:
     [stable]       Fully implemented and tested — use this.
-    [stub]         Skeleton only; use the original monolith script for now.
+    [stub]         Skeleton only; WIP skeleton structure to finish later.
     [experimental] Ported but not yet fully validated in production.
 
 Common Options:
@@ -133,13 +133,12 @@ Model-Specific Options:
 
 Examples:
   # Gemma 4 — vision + audio (E2B/E4B)
-  python {script} --model-type gemma4 --blob sha256-... \\
+  python {script} --model-type gemma4 \\
       --llm gemma-4-E2B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E2B-it-f16.gguf \\
       --vision --audio
 
   # Gemma 4 — vision only (26B MoE / 31B dense, no audio)
-  python {script} --model-type gemma4 --blob sha256-... \\
-      --llm gemma-4-26B-it-Q4_K_M.gguf --mmproj mmproj-gemma-4-26B-it-f16.gguf \\
+  python {script} --model-type gemma4 --llm gemma-4-26B-it-Q4_K_M.gguf --mmproj mmproj-gemma-4-26B-it-f16.gguf \\
       --vision
 """
 
@@ -273,7 +272,7 @@ def main() -> None:
             print("  chat template: not in blob (will source from LLM)")
     else:
         ref = ref_fields = official_chat_template = None
-        print("No blob provided — all KV values will be hardcoded (qwen3vl/qwen3vlmoe).")
+        print("No blob provided — KV values will sourced from LLM/mmproj fields or via hardcoding.")
 
     # ── 5. Load mmproj + process encoder tensors ─────────────────────
     print("\nLoading mmproj...")
